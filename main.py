@@ -1,6 +1,8 @@
 import os
 import subprocess
 import logging
+import time
+import threading
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from dotenv import load_dotenv
@@ -17,6 +19,8 @@ ALLOWED_USER_IDS = [int(id.strip()) for id in os.getenv("ALLOWED_USER_IDS", "").
 
 REPO_PATH = os.getenv("REPO_PATH")
 
+latest_update = None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mengirim pesan ketika command /start digunakan."""
     user_id = update.effective_user.id
@@ -25,7 +29,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        '2026 ganti gaya'
+        '2026 ganti GAYA'
     )
 
 async def check_permission(update: Update):
@@ -36,30 +40,62 @@ async def check_permission(update: Update):
         return False
     return True
 
-async def run_command(update: Update, command, working_dir=None, success_msg=None):
-    """Menjalankan perintah dan mengembalikan hasilnya"""
+async def run_command_with_timeout(update: Update, command, working_dir=None, success_msg=None, timeout=30):
+    """Menjalankan perintah dengan timeout dan mendeteksi repository private"""
+    global latest_update
+    latest_update = update
+    
     try:
         if working_dir:
             os.chdir(working_dir)
-            
+        
         process = subprocess.Popen(
             command, 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            shell=isinstance(command, str)
+            stdin=subprocess.PIPE,
+            shell=isinstance(command, str),
+            universal_newlines=True
         )
-        stdout, stderr = process.communicate()
+        
+        def check_output():
+            while process.poll() is None:
+                line = process.stderr.readline()
+                if line and ('Username for' in line or 'Password for' in line):
+                    subprocess.run(['kill', '-9', str(process.pid)], check=False)
+                    return "private_repo"
+                time.sleep(0.1)
+            return None
+        
+        thread = threading.Thread(target=check_output)
+        thread.daemon = True
+        thread.start()
+        
+        thread.join(timeout)
+        if thread.is_alive():
+            process.terminate()
+            await update.message.reply_text("Operasi timeout. Repositori mungkin meminta kredensial.")
+            return False
+        
+        stdout, stderr = process.communicate(timeout=5)
+        
+        if "private_repo" in str(stderr) or "Username for" in str(stderr) or "Password for" in str(stderr):
+            await update.message.reply_text("⚠️ Repositori private terdeteksi. Silakan login manual di server.")
+            return False
         
         if process.returncode == 0:
-            result = stdout.decode('utf-8')
+            result = stdout
             message = success_msg if success_msg else f"Perintah berhasil dijalankan:\n\n```\n{result}\n```"
             await update.message.reply_text(message)
             return True
         else:
-            error = stderr.decode('utf-8')
+            error = stderr
             await update.message.reply_text(f"Error saat menjalankan perintah:\n\n```\n{error}\n```")
             return False
             
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("⚠️ Repositori private terdeteksi. Silakan login manual di server.")
+        return False
     except Exception as e:
         await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
         return False
@@ -70,7 +106,7 @@ async def pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Menjalankan git pull...')
-    await run_command(
+    await run_command_with_timeout(
         update, 
         ['git', 'pull'], 
         working_dir=REPO_PATH,
@@ -83,7 +119,7 @@ async def pushdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Menjalankan npx prisma db push...')
-    await run_command(
+    await run_command_with_timeout(
         update, 
         ['npx', 'prisma', 'db', 'push'], 
         working_dir=REPO_PATH,
@@ -96,7 +132,7 @@ async def restart_backend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Merestart service backend...')
-    await run_command(
+    await run_command_with_timeout(
         update, 
         'systemctl restart backend', 
         success_msg="Service backend berhasil direstart!"
@@ -117,7 +153,7 @@ def main():
     application.add_handler(CommandHandler("pull", pull))
     application.add_handler(CommandHandler("pushdb", pushdb))
     application.add_handler(CommandHandler("restart", restart_backend))
-
+    
     logging.info("Bot mulai berjalan...")
     application.run_polling()
 
