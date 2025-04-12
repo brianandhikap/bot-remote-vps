@@ -1,0 +1,13 @@
+[Unit]
+Description=Bot Telegram Remote
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/directory
+ExecStart=/usr/bin/python3 /directory/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
