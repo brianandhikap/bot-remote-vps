@@ -15,7 +15,7 @@ logging.basicConfig(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USER_IDS = [int(id.strip()) for id in os.getenv("ALLOWED_USER_IDS", "").split(",") if id.strip()]
 
-REPO_PATH = "/home/mediaid/household-backend"
+REPO_PATH = os.getenv("REPO_PATH")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mengirim pesan ketika command /start digunakan."""
