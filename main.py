@@ -31,7 +31,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         '2026 ganti GAYA'
     )
-
 async def check_permission(update: Update):
     """Memeriksa apakah pengguna memiliki izin"""
     user_id = update.effective_user.id
@@ -40,62 +39,89 @@ async def check_permission(update: Update):
         return False
     return True
 
-async def run_command_with_timeout(update: Update, command, working_dir=None, success_msg=None, timeout=30):
-    """Menjalankan perintah dengan timeout dan mendeteksi repository private"""
-    global latest_update
-    latest_update = update
+def monitor_command(process, callback):
+    """Memantau output dari proses dan mendeteksi prompt username"""
+    is_private = [False]
     
+    def reader(pipe, is_stderr=False):
+        while True:
+            line = pipe.readline()
+            if not line:
+                break
+            line_str = line.decode('utf-8', errors='replace')
+            if 'Username for' in line_str:
+                is_private[0] = True
+                process.terminate()
+                break
+
+    stdout_thread = threading.Thread(target=reader, args=(process.stdout, False))
+    stderr_thread = threading.Thread(target=reader, args=(process.stderr, True))
+    
+    stdout_thread.daemon = True
+    stderr_thread.daemon = True
+    stdout_thread.start()
+    stderr_thread.start()
+    
+    process.wait()
+    
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    
+    callback(is_private[0], process.returncode)
+
+async def execute_command(update: Update, command, working_dir=None, success_msg=None):
+    """Menjalankan perintah shell dengan deteksi repository private"""
     try:
         if working_dir:
             os.chdir(working_dir)
         
         process = subprocess.Popen(
-            command, 
+            command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE,
-            shell=isinstance(command, str),
-            universal_newlines=True
+            shell=isinstance(command, str)
         )
         
-        def check_output():
-            while process.poll() is None:
-                line = process.stderr.readline()
-                if line and ('Username for' in line or 'Password for' in line):
-                    subprocess.run(['kill', '-9', str(process.pid)], check=False)
-                    return "private_repo"
-                time.sleep(0.1)
-            return None
+        result = {"private": False, "output": "", "error": "", "returncode": None}
         
-        thread = threading.Thread(target=check_output)
-        thread.daemon = True
-        thread.start()
+        def process_completed(is_private, returncode):
+            result["private"] = is_private
+            result["returncode"] = returncode
+            if not is_private:
+                try:
+                    result["output"] = process.stdout.read().decode('utf-8', errors='replace')
+                    result["error"] = process.stderr.read().decode('utf-8', errors='replace')
+                except:
+                    pass
         
-        thread.join(timeout)
-        if thread.is_alive():
+        monitor_thread = threading.Thread(
+            target=monitor_command, 
+            args=(process, process_completed)
+        )
+        monitor_thread.daemon = True
+        monitor_thread.start()
+        
+        monitor_thread.join(timeout=30)
+        
+        if process.poll() is None:
             process.terminate()
-            await update.message.reply_text("Operasi timeout. Repositori mungkin meminta kredensial.")
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        
+        if result["private"]:
+            await update.message.reply_text("repositori private")
             return False
-        
-        stdout, stderr = process.communicate(timeout=5)
-        
-        if "private_repo" in str(stderr) or "Username for" in str(stderr) or "Password for" in str(stderr):
-            await update.message.reply_text("⚠️ Repositori private terdeteksi. Silakan login manual di server.")
-            return False
-        
-        if process.returncode == 0:
-            result = stdout
-            message = success_msg if success_msg else f"Perintah berhasil dijalankan:\n\n```\n{result}\n```"
+        elif result["returncode"] == 0:
+            message = success_msg if success_msg else f"Perintah berhasil dijalankan:\n\n```\n{result['output']}\n```"
             await update.message.reply_text(message)
             return True
         else:
-            error = stderr
-            await update.message.reply_text(f"Error saat menjalankan perintah:\n\n```\n{error}\n```")
+            await update.message.reply_text(f"Error saat menjalankan perintah:\n\n```\n{result['error']}\n```")
             return False
             
-    except subprocess.TimeoutExpired:
-        await update.message.reply_text("⚠️ Repositori private terdeteksi. Silakan login manual di server.")
-        return False
     except Exception as e:
         await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
         return False
@@ -106,7 +132,7 @@ async def pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Menjalankan git pull...')
-    await run_command_with_timeout(
+    await execute_command(
         update, 
         ['git', 'pull'], 
         working_dir=REPO_PATH,
@@ -119,7 +145,7 @@ async def pushdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Menjalankan npx prisma db push...')
-    await run_command_with_timeout(
+    await execute_command(
         update, 
         ['npx', 'prisma', 'db', 'push'], 
         working_dir=REPO_PATH,
@@ -132,7 +158,7 @@ async def restart_backend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Merestart service backend...')
-    await run_command_with_timeout(
+    await execute_command(
         update, 
         'systemctl restart backend', 
         success_msg="Service backend berhasil direstart!"
@@ -148,12 +174,12 @@ def main():
         return
     
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("pull", pull))
     application.add_handler(CommandHandler("pushdb", pushdb))
     application.add_handler(CommandHandler("restart", restart_backend))
-    
+
     logging.info("Bot mulai berjalan...")
     application.run_polling()
 
