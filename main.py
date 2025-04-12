@@ -31,6 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         '2026 ganti GAYA'
     )
+
 async def check_permission(update: Update):
     """Memeriksa apakah pengguna memiliki izin"""
     user_id = update.effective_user.id
@@ -39,105 +40,48 @@ async def check_permission(update: Update):
         return False
     return True
 
-def monitor_command(process, callback):
-    """Memantau output dari proses dan mendeteksi prompt username"""
-    is_private = [False]
-    
-    def reader(pipe, is_stderr=False):
-        while True:
-            line = pipe.readline()
-            if not line:
-                break
-            line_str = line.decode('utf-8', errors='replace')
-            if 'Username for' in line_str:
-                is_private[0] = True
-                process.terminate()
-                break
-
-    stdout_thread = threading.Thread(target=reader, args=(process.stdout, False))
-    stderr_thread = threading.Thread(target=reader, args=(process.stderr, True))
-    
-    stdout_thread.daemon = True
-    stderr_thread.daemon = True
-    stdout_thread.start()
-    stderr_thread.start()
-    
-    process.wait()
-    
-    stdout_thread.join(timeout=1)
-    stderr_thread.join(timeout=1)
-    
-    callback(is_private[0], process.returncode)
-
-async def execute_command(update: Update, command, working_dir=None, success_msg=None):
-    """Menjalankan perintah shell dengan deteksi repository private"""
-    try:
-        if working_dir:
-            os.chdir(working_dir)
-        
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
-            shell=isinstance(command, str)
-        )
-        
-        result = {"private": False, "output": "", "error": "", "returncode": None}
-        
-        def process_completed(is_private, returncode):
-            result["private"] = is_private
-            result["returncode"] = returncode
-            if not is_private:
-                try:
-                    result["output"] = process.stdout.read().decode('utf-8', errors='replace')
-                    result["error"] = process.stderr.read().decode('utf-8', errors='replace')
-                except:
-                    pass
-        
-        monitor_thread = threading.Thread(
-            target=monitor_command, 
-            args=(process, process_completed)
-        )
-        monitor_thread.daemon = True
-        monitor_thread.start()
-        
-        monitor_thread.join(timeout=30)
-        
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-        
-        if result["private"]:
-            await update.message.reply_text("repositori private")
-            return False
-        elif result["returncode"] == 0:
-            message = success_msg if success_msg else f"Perintah berhasil dijalankan:\n\n```\n{result['output']}\n```"
-            await update.message.reply_text(message)
-            return True
-        else:
-            await update.message.reply_text(f"Error saat menjalankan perintah:\n\n```\n{result['error']}\n```")
-            return False
-            
-    except Exception as e:
-        await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
-        return False
-
-async def pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menjalankan git pull pada repository."""
+async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menjalankan git pull dengan deteksi repository private."""
     if not await check_permission(update):
         return
     
     await update.message.reply_text('Menjalankan git pull...')
-    await execute_command(
-        update, 
-        ['git', 'pull'], 
-        working_dir=REPO_PATH,
-        success_msg="Git pull berhasil dilakukan!"
-    )
+    
+    try:
+        os.chdir(REPO_PATH)
+        
+        process = subprocess.run(
+            "GIT_TERMINAL_PROMPT=0 git pull",
+            shell=True, 
+            capture_output=True, 
+            text=True, 
+            timeout=10
+        )
+        
+        output = process.stdout + process.stderr
+        
+        if "Authentication failed" in output or "could not read Username" in output:
+            await update.message.reply_text("repositori private")
+        elif process.returncode == 0:
+            await update.message.reply_text(f"Git pull berhasil dilakukan!\n\n```\n{process.stdout}\n```")
+        else:
+            try:
+                test_process = subprocess.run(
+                    "git pull",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+            except subprocess.TimeoutExpired:
+                await update.message.reply_text("repositori private")
+                return
+                
+            await update.message.reply_text(f"Error saat menjalankan git pull:\n\n```\n{process.stderr}\n```")
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("repositori private")
+    except Exception as e:
+        await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
 
 async def pushdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menjalankan npx prisma db push."""
@@ -145,12 +89,25 @@ async def pushdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Menjalankan npx prisma db push...')
-    await execute_command(
-        update, 
-        ['npx', 'prisma', 'db', 'push'], 
-        working_dir=REPO_PATH,
-        success_msg="Database berhasil diupdate dengan prisma db push!"
-    )
+    
+    try:
+        os.chdir(REPO_PATH)
+        
+        process = subprocess.run(
+            ["npx", "prisma", "db", "push"],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if process.returncode == 0:
+            await update.message.reply_text(f"Database berhasil diupdate dengan prisma db push!\n\n```\n{process.stdout}\n```")
+        else:
+            await update.message.reply_text(f"Error saat menjalankan npx prisma db push:\n\n```\n{process.stderr}\n```")
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("Operasi timeout. Periksa server secara manual.")
+    except Exception as e:
+        await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
 
 async def restart_backend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Merestart service backend."""
@@ -158,11 +115,23 @@ async def restart_backend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text('Merestart service backend...')
-    await execute_command(
-        update, 
-        'systemctl restart backend', 
-        success_msg="Service backend berhasil direstart!"
-    )
+    
+    try:
+        process = subprocess.run(
+            ["systemctl", "restart", "backend"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if process.returncode == 0:
+            await update.message.reply_text("Service backend berhasil direstart!")
+        else:
+            await update.message.reply_text(f"Error saat merestart backend:\n\n```\n{process.stderr}\n```")
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("Operasi timeout. Periksa server secara manual.")
+    except Exception as e:
+        await update.message.reply_text(f"Terjadi kesalahan: {str(e)}")
 
 def main():
     if not BOT_TOKEN:
@@ -174,9 +143,9 @@ def main():
         return
     
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-
+    
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("pull", pull))
+    application.add_handler(CommandHandler("pull", git_pull))
     application.add_handler(CommandHandler("pushdb", pushdb))
     application.add_handler(CommandHandler("restart", restart_backend))
 
