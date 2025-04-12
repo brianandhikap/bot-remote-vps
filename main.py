@@ -121,7 +121,7 @@ async def restart_backend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ["systemctl", "restart", "backend"],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=180
         )
         
         if process.returncode == 0:
